@@ -419,10 +419,22 @@ class NetworkMonitor:
                         max_latency_anomaly = max(self.anomaly_window)
                         min_latency_anomaly = min(self.anomaly_window)
                         
-                        # Calcula baseline durante o período
-                        baseline_during = "N/A"
+                        # Calcula baseline (latência normal ANTES da anomalia)
+                        baseline_avg = 0
+                        baseline_min = 0
+                        baseline_max = 0
+                        increase_percent = 0
+                        
                         if len(self.baseline_latencies) >= 10:
-                            baseline_during = f"{statistics.mean(list(self.baseline_latencies)[-50:]):.1f}ms"
+                            # Usa últimas 50 latências normais como baseline
+                            baseline_list = list(self.baseline_latencies)[-50:]
+                            baseline_avg = statistics.mean(baseline_list)
+                            baseline_min = min(baseline_list)
+                            baseline_max = max(baseline_list)
+                            
+                            # Calcula quanto aumentou em %
+                            if baseline_avg > 0:
+                                increase_percent = ((avg_latency_anomaly - baseline_avg) / baseline_avg) * 100
                         
                         anomaly_data = {
                             'start_time': self.anomaly_start_time,
@@ -434,7 +446,10 @@ class NetworkMonitor:
                             'pings_affected': pings_affected,
                             'start_ping_number': self.anomaly_start_index,
                             'detection_method': getattr(self, 'anomaly_reason', 'threshold'),
-                            'baseline_avg': baseline_during
+                            'baseline_avg': baseline_avg,
+                            'baseline_min': baseline_min,
+                            'baseline_max': baseline_max,
+                            'increase_percent': increase_percent
                         }
                         
                         self.detected_anomalies.append(anomaly_data)
@@ -459,7 +474,8 @@ class NetworkMonitor:
                     writer.writerow([
                         'Data', 'Hora_Inicio', 'Hora_Fim', 'Duracao_Segundos', 
                         'Latencia_Media_Pico', 'Latencia_Min_Pico', 'Latencia_Max_Pico', 
-                        'Pings_Afetados', 'Numero_Ping_Inicio', 'Metodo_Deteccao', 'Baseline_Media'
+                        'Pings_Afetados', 'Numero_Ping_Inicio', 'Metodo_Deteccao', 
+                        'Baseline_Media', 'Baseline_Min', 'Baseline_Max', 'Aumento_Percentual'
                     ])
                 
                 writer.writerow([
@@ -473,7 +489,10 @@ class NetworkMonitor:
                     anomaly_data['pings_affected'],
                     anomaly_data['start_ping_number'],
                     anomaly_data.get('detection_method', 'threshold'),
-                    anomaly_data.get('baseline_avg', 'N/A')
+                    f"{anomaly_data.get('baseline_avg', 0):.2f}" if anomaly_data.get('baseline_avg', 0) > 0 else 'N/A',
+                    f"{anomaly_data.get('baseline_min', 0):.2f}" if anomaly_data.get('baseline_min', 0) > 0 else 'N/A',
+                    f"{anomaly_data.get('baseline_max', 0):.2f}" if anomaly_data.get('baseline_max', 0) > 0 else 'N/A',
+                    f"{anomaly_data.get('increase_percent', 0):.1f}%" if anomaly_data.get('increase_percent', 0) > 0 else 'N/A'
                 ])
         except Exception as e:
             print(f"Erro ao salvar anomalia: {e}")
@@ -1112,15 +1131,47 @@ class MonitorGUI:
                 if len(parts) >= 9:
                     anomaly_count += 1
                     self.anomaly_text.insert(tk.END, f"╔═══ ANOMALIA #{anomaly_count} ═══════════════════════════════════════════════╗\n")
-                    self.anomaly_text.insert(tk.END, f"║ Data:           {parts[0]}\n")
-                    self.anomaly_text.insert(tk.END, f"║ Início:         {parts[1]}\n")
-                    self.anomaly_text.insert(tk.END, f"║ Fim:            {parts[2]}\n")
-                    self.anomaly_text.insert(tk.END, f"║ Duração:        {parts[3]} segundos\n")
-                    self.anomaly_text.insert(tk.END, f"║ Latência Média: {parts[4]} ms (média SOMENTE do pico)\n")
-                    self.anomaly_text.insert(tk.END, f"║ Latência Mín:   {parts[5]} ms (menor durante pico)\n")
-                    self.anomaly_text.insert(tk.END, f"║ Latência Máx:   {parts[6]} ms (maior durante pico)\n")
-                    self.anomaly_text.insert(tk.END, f"║ Pings Afetados: {parts[7]}\n")
-                    self.anomaly_text.insert(tk.END, f"║ Ping Número:    {parts[8]}\n")
+                    self.anomaly_text.insert(tk.END, f"║ 📅 Data:        {parts[0]}\n")
+                    self.anomaly_text.insert(tk.END, f"║ ⏰ Início:      {parts[1]}\n")
+                    self.anomaly_text.insert(tk.END, f"║ ⏱️  Fim:         {parts[2]}\n")
+                    self.anomaly_text.insert(tk.END, f"║ ⌛ Duração:     {parts[3]} segundos\n")
+                    self.anomaly_text.insert(tk.END, f"║\n")
+                    
+                    # Verifica se tem dados de baseline (arquivos novos vs antigos)
+                    if len(parts) >= 14 and parts[10] != 'N/A':
+                        # Arquivo novo com baseline completo
+                        self.anomaly_text.insert(tk.END, f"║ 📊 LATÊNCIA NORMAL (antes da anomalia):\n")
+                        self.anomaly_text.insert(tk.END, f"║    • Média:  {parts[10]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║    • Mínima: {parts[11]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║    • Máxima: {parts[12]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║\n")
+                        self.anomaly_text.insert(tk.END, f"║ 🔥 LATÊNCIA DURANTE O PICO:\n")
+                        self.anomaly_text.insert(tk.END, f"║    • Média:  {parts[4]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║    • Mínima: {parts[5]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║    • Máxima: {parts[6]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║\n")
+                        self.anomaly_text.insert(tk.END, f"║ 📈 Aumento:    {parts[13]}\n")
+                    elif len(parts) >= 11 and parts[10] != 'N/A':
+                        # Arquivo antigo com apenas baseline_media
+                        self.anomaly_text.insert(tk.END, f"║ 📊 Baseline:   {parts[10]} (média normal)\n")
+                        self.anomaly_text.insert(tk.END, f"║ 🔥 Pico Médio: {parts[4]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║ 📉 Pico Mín:   {parts[5]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║ 📈 Pico Máx:   {parts[6]} ms\n")
+                    else:
+                        # Arquivo muito antigo sem baseline
+                        self.anomaly_text.insert(tk.END, f"║ 🔥 Latência Média: {parts[4]} ms (média durante pico)\n")
+                        self.anomaly_text.insert(tk.END, f"║ 📉 Latência Mín:   {parts[5]} ms\n")
+                        self.anomaly_text.insert(tk.END, f"║ 📈 Latência Máx:   {parts[6]} ms\n")
+                    
+                    self.anomaly_text.insert(tk.END, f"║\n")
+                    self.anomaly_text.insert(tk.END, f"║ 📍 Pings Afetados: {parts[7]}\n")
+                    self.anomaly_text.insert(tk.END, f"║ 🔢 Ping Número:    {parts[8]}\n")
+                    
+                    # Método de detecção se disponível
+                    if len(parts) >= 10:
+                        method = parts[9] if parts[9] else 'threshold'
+                        self.anomaly_text.insert(tk.END, f"║ 🔍 Método:         {method}\n")
+                    
                     self.anomaly_text.insert(tk.END, f"╚════════════════════════════════════════════════════════════════════════════╝\n\n")
             
             # Extrai nome da rede do arquivo
