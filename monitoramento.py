@@ -455,7 +455,9 @@ class NetworkMonitor:
                         self.detected_anomalies.append(anomaly_data)
                         self.save_anomaly(anomaly_data)
                         
-                        print(f"✅ Anomalia registrada: {duration:.1f}s, {pings_affected} pings, média {avg_latency_anomaly:.1f}ms (baseline: {baseline_during})")
+                        baseline_info = f"{baseline_avg:.1f}ms" if baseline_avg > 0 else "N/A"
+                        increase_info = f"+{increase_percent:.1f}%" if increase_percent > 0 else ""
+                        print(f"✅ Anomalia registrada: {duration:.1f}s, {pings_affected} pings, média {avg_latency_anomaly:.1f}ms (baseline: {baseline_info} {increase_info})")
                     else:
                         # Anomalia muito curta - descarta
                         print(f"⏭️ Anomalia descartada: apenas {pings_affected} ping(s) afetado(s) - mínimo necessário: {self.anomaly_min_pings}")
@@ -1112,10 +1114,12 @@ class MonitorGUI:
                 self.anomaly_info_label.config(text="Sistema ativo - aguardando anomalias")
                 return
             
+            # Usa csv.reader para ler corretamente (evita problema com vírgulas nos campos)
             with open(file_to_read, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+                csv_reader = csv.reader(f)
+                rows = list(csv_reader)
                 
-            if len(lines) <= 1:
+            if len(rows) <= 1:
                 self.anomaly_text.insert(tk.END, "✅ Nenhuma anomalia detectada ainda.\n")
                 self.anomaly_info_label.config(text="Sistema ativo - aguardando anomalias")
                 return
@@ -1126,8 +1130,7 @@ class MonitorGUI:
             self.anomaly_text.insert(tk.END, "═══════════════════════════════════════════════════════════════════════════\n\n")
             
             anomaly_count = 0
-            for i, line in enumerate(lines[1:], 1):  # Pula header
-                parts = line.strip().split(',')
+            for parts in rows[1:]:  # Pula header
                 if len(parts) >= 9:
                     anomaly_count += 1
                     self.anomaly_text.insert(tk.END, f"╔═══ ANOMALIA #{anomaly_count} ═══════════════════════════════════════════════╗\n")

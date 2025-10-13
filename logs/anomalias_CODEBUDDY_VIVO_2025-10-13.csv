@@ -1,0 +1,2 @@
+Data,Hora_Inicio,Hora_Fim,Duracao_Segundos,Latencia_Media_Pico,Latencia_Min_Pico,Latencia_Max_Pico,Pings_Afetados,Numero_Ping_Inicio,Metodo_Deteccao,Baseline_Media,Baseline_Min,Baseline_Max,Aumento_Percentual
+2025-10-13,17:33:25,17:34:22,57.05,21.67,12.00,180.00,48,87,"desvio estatístico (média=14.2ms, limite=27.0ms)",14.24,12.00,42.00,52.2%
