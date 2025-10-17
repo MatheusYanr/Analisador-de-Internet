@@ -31,9 +31,7 @@ if not os.path.exists('logs'):
 
 
 class NetworkMonitor:
-    def __init__(self, monitor_id="default", wifi_ssid=None):
-        self.monitor_id = monitor_id  # ID único do monitor
-        self.wifi_ssid = wifi_ssid  # SSID do WiFi sendo monitorado
+    def __init__(self):
         self.monitoring = False
         self.data_queue = queue.Queue()
         # OTIMIZAÇÃO: Mantém apenas 200 amostras no gráfico (performance)
@@ -43,7 +41,6 @@ class NetworkMonitor:
         self.packet_loss_history = deque(maxlen=50)
         self.download_speed_history = deque(maxlen=30)
         self.ping_count_offset = 0  # Offset para mostrar número real no eixo X
-        self.monitor_thread = None  # Thread dedicada para este monitor
         
         # Servidores para monitoramento
         self.servers = {
@@ -74,6 +71,8 @@ class NetworkMonitor:
         self.config_file = 'network_monitor_config.json'
         self.log_file = 'logs/network_monitor_log.csv'
         self.anomaly_file = 'logs/anomalias_detectadas.csv'
+        self.current_wifi_ssid = None  # WiFi atual sendo monitorado
+        self.last_known_wifi = None  # Último WiFi conectado (para reconexão)
         self.enable_alerts = True
         self.enable_sound_alerts = True
         self.enable_auto_export = True
@@ -140,6 +139,96 @@ class NetworkMonitor:
             print(f"Erro ao detectar gateway: {e}")
             return None
     
+    def update_anomaly_filename_with_wifi(self):
+        """Atualiza nome do arquivo de anomalias incluindo o WiFi atual"""
+        try:
+            # Tenta detectar WiFi conectado
+            result = subprocess.run(
+                ['netsh', 'wlan', 'show', 'interfaces'],
+                capture_output=True,
+                text=True,
+                encoding='cp850',
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            current_ssid = None
+            for line in result.stdout.split('\n'):
+                if 'SSID' in line and ':' in line and 'BSSID' not in line:
+                    ssid = line.split(':', 1)[1].strip()
+                    if ssid:
+                        current_ssid = ssid
+                        break
+            
+            # Atualiza arquivo de anomalias com nome do WiFi
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            
+            if current_ssid:
+                self.current_wifi_ssid = current_ssid
+                self.last_known_wifi = current_ssid
+                # Remove caracteres inválidos para nome de arquivo
+                safe_ssid = "".join(c for c in current_ssid if c.isalnum() or c in (' ', '_', '-')).strip()
+                safe_ssid = safe_ssid.replace(' ', '_')
+                self.anomaly_file = f'logs/anomalias_{safe_ssid}_{date_str}.csv'
+                print(f"📊 Arquivo de anomalias: {self.anomaly_file}")
+            else:
+                # Sem WiFi - usa arquivo padrão com Ethernet ou cabo
+                self.current_wifi_ssid = None
+                self.anomaly_file = f'logs/anomalias_ETHERNET_{date_str}.csv'
+                print(f"🔌 Monitorando via cabo - Arquivo: {self.anomaly_file}")
+                
+        except Exception as e:
+            print(f"Erro ao atualizar arquivo de anomalias: {e}")
+            # Fallback para arquivo padrão
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            self.anomaly_file = f'logs/anomalias_DESCONHECIDO_{date_str}.csv'
+    
+    def check_and_reconnect_wifi(self):
+        """Verifica se WiFi desconectou e tenta reconectar"""
+        if not self.enable_wifi_reconnect or not self.last_known_wifi:
+            return
+        
+        try:
+            # Verifica se ainda está conectado ao mesmo WiFi
+            result = subprocess.run(
+                ['netsh', 'wlan', 'show', 'interfaces'],
+                capture_output=True,
+                text=True,
+                encoding='cp850',
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            current_ssid = None
+            for line in result.stdout.split('\n'):
+                if 'SSID' in line and ':' in line and 'BSSID' not in line:
+                    ssid = line.split(':', 1)[1].strip()
+                    if ssid:
+                        current_ssid = ssid
+                        break
+            
+            # Se desconectou do WiFi que estava sendo monitorado
+            if not current_ssid or current_ssid != self.last_known_wifi:
+                print(f"⚠️ WiFi desconectado! Era: '{self.last_known_wifi}', Agora: '{current_ssid or 'DESCONECTADO'}'")
+                print(f"🔄 Tentando reconectar ao '{self.last_known_wifi}'...")
+                
+                # Tenta reconectar
+                reconnect_result = subprocess.run(
+                    ['netsh', 'wlan', 'connect', f'name={self.last_known_wifi}'],
+                    capture_output=True,
+                    text=True,
+                    encoding='cp850',
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                
+                if 'solicitação de conexão foi concluída com êxito' in reconnect_result.stdout.lower():
+                    print(f"✅ Reconectado com sucesso ao '{self.last_known_wifi}'!")
+                    time.sleep(2)  # Aguarda estabilização
+                    self.update_anomaly_filename_with_wifi()  # Atualiza nome do arquivo
+                else:
+                    print(f"❌ Falha ao reconectar: {reconnect_result.stdout}")
+                    
+        except Exception as e:
+            print(f"Erro ao verificar/reconectar WiFi: {e}")
+    
     def save_config(self):
         try:
             config = {
@@ -184,11 +273,17 @@ class NetworkMonitor:
     def monitor_loop(self, callback):
         self.stats['start_time'] = datetime.now()
         consecutive_failures = 0
+        ping_counter = 0  # Contador para verificação periódica de WiFi
         
         while self.monitoring:
             try:
-                loop_iteration += 1
                 start_time = time.time()
+                
+                # Verifica reconexão WiFi a cada 10 pings
+                ping_counter += 1
+                if ping_counter >= 10:
+                    self.check_and_reconnect_wifi()
+                    ping_counter = 0
                 
                 latency = self.ping_host(self.current_server)
                 timestamp = datetime.now()
@@ -266,12 +361,8 @@ class NetworkMonitor:
                 time.sleep(sleep_time)
                 
             except Exception as e:
-                print(f"❌ ERRO no loop de monitoramento ({self.wifi_ssid or 'padrão'}): {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"Erro no loop de monitoramento: {e}")
                 time.sleep(self.interval)
-        
-        print(f"⏹️ Loop finalizado para {self.wifi_ssid or 'monitor padrão'} (total: {loop_iteration} iterações)")
     
     def log_to_file(self, timestamp, latency):
         """
@@ -334,6 +425,8 @@ class NetworkMonitor:
     def start_monitoring(self, callback):
         if not self.monitoring:
             self.monitoring = True
+            # Atualiza arquivo de anomalias com nome do WiFi atual
+            self.update_anomaly_filename_with_wifi()
             thread = threading.Thread(target=self.monitor_loop, args=(callback,), daemon=True)
             thread.start()
     
@@ -475,6 +568,7 @@ class NetworkMonitor:
     def save_anomaly(self, anomaly_data):
         """Salva anomalia detectada em arquivo CSV"""
         try:
+            print(f"💾 Salvando anomalia em: {self.anomaly_file}")
             file_exists = os.path.exists(self.anomaly_file)
             with open(self.anomaly_file, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -663,10 +757,6 @@ class MonitorGUI:
         self.tab_config = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_config, text='⚙️ Configurações')
         self.create_config_tab()
-        
-        self.tab_dual = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_dual, text='🔀 Monitoramento Dual')
-        self.create_dual_monitor_tab()
         
         self.tab_wifi = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_wifi, text='📡 Multi-Redes WiFi')
@@ -1418,675 +1508,6 @@ class MonitorGUI:
         except Exception as e:
             self.system_info_text.insert(tk.END, f"Erro ao obter informações: {e}")
     
-    def create_dual_monitor_tab(self):
-        """🔀 Aba para monitorar 2 WiFis simultaneamente usando threads"""
-        
-        # Canvas com scrollbar para garantir visibilidade de todos os elementos
-        canvas = tk.Canvas(self.tab_dual, bg='#0f1419', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.tab_dual, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-        
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        # Bind da roda do mouse para scroll
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
-        # Frame principal dentro do canvas
-        main_frame = ttk.Frame(scrollable_frame)
-        main_frame.pack(fill='both', expand=True, padx=20, pady=15)
-        
-        # Título e instruções
-        title_frame = ttk.LabelFrame(main_frame, text='🔀  Monitoramento Simultâneo de Duas Redes', padding=20)
-        title_frame.pack(fill='x', pady=(0, 15))
-        
-        instructions = ttk.Label(title_frame, 
-            text="Configure e monitore 2 redes WiFi ao mesmo tempo em threads separadas.\n"
-                 "Cada rede terá seus próprios logs, gráficos e anomalias independentes.\n\n"
-                 "🔍 Clique no botão de scan (🔍) para detectar redes disponíveis.\n"
-                 "🔄 Ao iniciar, o sistema salva sua rede atual e restaura ao parar.\n"
-                 "⚡ Cada WiFi roda em uma thread dedicada com logs independentes.\n"
-                 "🚨 Anomalias detectadas são salvas automaticamente em: logs/anomalias_{SSID}_{DATA}.csv\n"
-                 "⚙️ Configurações de anomalia (threshold e %) vêm da aba Configurações.\n"
-                 "🔇 Alertas sonoros DESABILITADOS nesta aba (menos intrusivo para monitoramento dual).",
-            font=('Segoe UI', 9),
-            foreground='#8b92a8',
-            justify='center')
-        instructions.pack(pady=10)
-        
-        # Container para os 2 monitores lado a lado
-        monitors_container = ttk.Frame(main_frame)
-        monitors_container.pack(fill='both', expand=True)
-        
-        # ===== MONITOR 1 (Esquerda) =====
-        monitor1_frame = ttk.LabelFrame(monitors_container, text='📶  WiFi 1', padding=20)
-        monitor1_frame.pack(side='left', fill='both', expand=True, padx=(0, 10))
-        
-        # Config WiFi 1 - Combobox com scan
-        wifi1_select_frame = ttk.Frame(monitor1_frame)
-        wifi1_select_frame.pack(fill='x', pady=(0, 10))
-        
-        ttk.Label(wifi1_select_frame, text='Nome da Rede (SSID):', font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
-        
-        wifi1_combo_frame = ttk.Frame(wifi1_select_frame)
-        wifi1_combo_frame.pack(fill='x')
-        
-        self.dual_wifi1_combo = ttk.Combobox(wifi1_combo_frame, 
-            values=[],
-            state='normal',
-            font=('Segoe UI', 10))
-        self.dual_wifi1_combo.pack(side='left', fill='x', expand=True, padx=(0, 5))
-        
-        ttk.Button(wifi1_combo_frame, 
-            text='🔍', 
-            width=3,
-            command=lambda: self.dual_scan_wifi(1),
-            style='Primary.TButton').pack(side='left')
-        
-        ttk.Label(monitor1_frame, text='Servidor:', font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
-        self.dual_server1_combo = ttk.Combobox(monitor1_frame, 
-            values=['8.8.8.8', '1.1.1.1', '208.67.222.222'],
-            state='readonly',
-            width=32,
-            font=('Segoe UI', 10))
-        self.dual_server1_combo.set('8.8.8.8')
-        self.dual_server1_combo.pack(fill='x', pady=(0, 10))
-        
-        ttk.Label(monitor1_frame, text='Intervalo (s):', font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
-        self.dual_interval1_spin = ttk.Spinbox(monitor1_frame, from_=0.5, to=10, increment=0.5, width=33)
-        self.dual_interval1_spin.set(1.0)
-        self.dual_interval1_spin.pack(fill='x', pady=(0, 15))
-        
-        # Status WiFi 1 com frame para melhor layout
-        status1_container = ttk.Frame(monitor1_frame)
-        status1_container.pack(pady=10, fill='x')
-        
-        self.dual_status1_label = ttk.Label(status1_container, 
-            text='⚪ Parado', 
-            font=('Segoe UI', 11, 'bold'),
-            foreground='#8b92a8')
-        self.dual_status1_label.pack()
-        
-        self.dual_anomaly1_label = ttk.Label(status1_container,
-            text='',
-            font=('Segoe UI', 9),
-            foreground='#f97316')
-        self.dual_anomaly1_label.pack()
-        
-        # Gráfico WiFi 1
-        self.dual_fig1 = Figure(figsize=(6, 3.5), facecolor='#1a1f2e', edgecolor='#252b3b', linewidth=2)
-        self.dual_ax1 = self.dual_fig1.add_subplot(111, facecolor='#0f1419')
-        self.dual_ax1.set_xlabel('Tempo (pings)', color='#e1e4e8', fontsize=9, fontweight='bold')
-        self.dual_ax1.set_ylabel('Latência (ms)', color='#e1e4e8', fontsize=9, fontweight='bold')
-        self.dual_ax1.tick_params(colors='#e1e4e8', labelsize=8)
-        self.dual_ax1.grid(True, alpha=0.2, linestyle='--', linewidth=0.8, color='#58a6ff')
-        self.dual_ax1.spines['top'].set_visible(False)
-        self.dual_ax1.spines['right'].set_visible(False)
-        self.dual_ax1.spines['left'].set_color('#58a6ff')
-        self.dual_ax1.spines['bottom'].set_color('#58a6ff')
-        
-        self.dual_canvas1 = FigureCanvasTkAgg(self.dual_fig1, monitor1_frame)
-        self.dual_canvas1.draw()
-        self.dual_canvas1.get_tk_widget().pack(fill='both', expand=True, pady=(10, 10))
-        
-        # Estatísticas WiFi 1
-        self.dual_stats1_text = scrolledtext.ScrolledText(monitor1_frame, 
-            height=6, 
-            bg='#1a1f2e', 
-            fg='#e1e4e8',
-            font=('Consolas', 8))
-        self.dual_stats1_text.pack(fill='x', pady=(0, 10))
-        self.dual_stats1_text.insert('1.0', 'Aguardando inicialização...')
-        
-        # Botões WiFi 1
-        btn_frame1 = ttk.Frame(monitor1_frame)
-        btn_frame1.pack(fill='x')
-        
-        self.dual_start1_btn = ttk.Button(btn_frame1, 
-            text='▶️ Iniciar', 
-            command=lambda: self.dual_start_monitor(1),
-            style='Success.TButton')
-        self.dual_start1_btn.pack(side='left', padx=5, expand=True, fill='x')
-        
-        self.dual_stop1_btn = ttk.Button(btn_frame1, 
-            text='⏹️ Parar', 
-            command=lambda: self.dual_stop_monitor(1),
-            state='disabled',
-            style='Danger.TButton')
-        self.dual_stop1_btn.pack(side='left', padx=5, expand=True, fill='x')
-        
-        # ===== MONITOR 2 (Direita) =====
-        monitor2_frame = ttk.LabelFrame(monitors_container, text='📶  WiFi 2', padding=20)
-        monitor2_frame.pack(side='left', fill='both', expand=True, padx=(10, 0))
-        
-        # Config WiFi 2 - Combobox com scan
-        wifi2_select_frame = ttk.Frame(monitor2_frame)
-        wifi2_select_frame.pack(fill='x', pady=(0, 10))
-        
-        ttk.Label(wifi2_select_frame, text='Nome da Rede (SSID):', font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
-        
-        wifi2_combo_frame = ttk.Frame(wifi2_select_frame)
-        wifi2_combo_frame.pack(fill='x')
-        
-        self.dual_wifi2_combo = ttk.Combobox(wifi2_combo_frame, 
-            values=[],
-            state='normal',
-            font=('Segoe UI', 10))
-        self.dual_wifi2_combo.pack(side='left', fill='x', expand=True, padx=(0, 5))
-        
-        ttk.Button(wifi2_combo_frame, 
-            text='🔍', 
-            width=3,
-            command=lambda: self.dual_scan_wifi(2),
-            style='Primary.TButton').pack(side='left')
-        
-        ttk.Label(monitor2_frame, text='Servidor:', font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
-        self.dual_server2_combo = ttk.Combobox(monitor2_frame, 
-            values=['8.8.8.8', '1.1.1.1', '208.67.222.222'],
-            state='readonly',
-            width=32,
-            font=('Segoe UI', 10))
-        self.dual_server2_combo.set('1.1.1.1')
-        self.dual_server2_combo.pack(fill='x', pady=(0, 10))
-        
-        ttk.Label(monitor2_frame, text='Intervalo (s):', font=('Segoe UI', 10, 'bold')).pack(anchor='w', pady=(0, 5))
-        self.dual_interval2_spin = ttk.Spinbox(monitor2_frame, from_=0.5, to=10, increment=0.5, width=33)
-        self.dual_interval2_spin.set(1.0)
-        self.dual_interval2_spin.pack(fill='x', pady=(0, 15))
-        
-        # Status WiFi 2 com frame para melhor layout
-        status2_container = ttk.Frame(monitor2_frame)
-        status2_container.pack(pady=10, fill='x')
-        
-        self.dual_status2_label = ttk.Label(status2_container, 
-            text='⚪ Parado', 
-            font=('Segoe UI', 11, 'bold'),
-            foreground='#8b92a8')
-        self.dual_status2_label.pack()
-        
-        self.dual_anomaly2_label = ttk.Label(status2_container,
-            text='',
-            font=('Segoe UI', 9),
-            foreground='#f97316')
-        self.dual_anomaly2_label.pack()
-        
-        # Gráfico WiFi 2
-        self.dual_fig2 = Figure(figsize=(6, 3.5), facecolor='#1a1f2e', edgecolor='#252b3b', linewidth=2)
-        self.dual_ax2 = self.dual_fig2.add_subplot(111, facecolor='#0f1419')
-        self.dual_ax2.set_xlabel('Tempo (pings)', color='#e1e4e8', fontsize=9, fontweight='bold')
-        self.dual_ax2.set_ylabel('Latência (ms)', color='#e1e4e8', fontsize=9, fontweight='bold')
-        self.dual_ax2.tick_params(colors='#e1e4e8', labelsize=8)
-        self.dual_ax2.grid(True, alpha=0.2, linestyle='--', linewidth=0.8, color='#3fb950')
-        self.dual_ax2.spines['top'].set_visible(False)
-        self.dual_ax2.spines['right'].set_visible(False)
-        self.dual_ax2.spines['left'].set_color('#3fb950')
-        self.dual_ax2.spines['bottom'].set_color('#3fb950')
-        
-        self.dual_canvas2 = FigureCanvasTkAgg(self.dual_fig2, monitor2_frame)
-        self.dual_canvas2.draw()
-        self.dual_canvas2.get_tk_widget().pack(fill='both', expand=True, pady=(10, 10))
-        
-        # Estatísticas WiFi 2
-        self.dual_stats2_text = scrolledtext.ScrolledText(monitor2_frame, 
-            height=6, 
-            bg='#1a1f2e', 
-            fg='#e1e4e8',
-            font=('Consolas', 8))
-        self.dual_stats2_text.pack(fill='x', pady=(0, 10))
-        self.dual_stats2_text.insert('1.0', 'Aguardando inicialização...')
-        
-        # Botões WiFi 2
-        btn_frame2 = ttk.Frame(monitor2_frame)
-        btn_frame2.pack(fill='x')
-        
-        self.dual_start2_btn = ttk.Button(btn_frame2, 
-            text='▶️ Iniciar', 
-            command=lambda: self.dual_start_monitor(2),
-            style='Success.TButton')
-        self.dual_start2_btn.pack(side='left', padx=5, expand=True, fill='x')
-        
-        self.dual_stop2_btn = ttk.Button(btn_frame2, 
-            text='⏹️ Parar', 
-            command=lambda: self.dual_stop_monitor(2),
-            state='disabled',
-            style='Danger.TButton')
-        self.dual_stop2_btn.pack(side='left', padx=5, expand=True, fill='x')
-        
-        # Botão para iniciar/parar ambos
-        control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill='x', pady=15)
-        
-        ttk.Button(control_frame, 
-            text='🚀 Iniciar AMBOS Simultaneamente', 
-            command=self.dual_start_both,
-            style='Primary.TButton',
-            width=35).pack(side='left', padx=5, expand=True)
-        
-        ttk.Button(control_frame, 
-            text='⏹️ Parar AMBOS', 
-            command=self.dual_stop_both,
-            style='Danger.TButton',
-            width=35).pack(side='left', padx=5, expand=True)
-        
-        # Inicializa variáveis de controle
-        self.dual_monitors = {1: None, 2: None}
-        self.dual_update_threads = {1: None, 2: None}
-        self.dual_original_wifi = None  # Guarda WiFi original para restaurar depois
-        
-        # Inicia atualização automática das estatísticas
-        self.dual_update_stats()
-    
-    def dual_get_current_wifi(self):
-        """Detecta o SSID da rede WiFi atualmente conectada"""
-        try:
-            result = subprocess.run(
-                ['netsh', 'wlan', 'show', 'interfaces'],
-                capture_output=True,
-                text=True,
-                encoding='cp850',
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=3
-            )
-            
-            for line in result.stdout.split('\n'):
-                if 'SSID' in line and ':' in line and 'BSSID' not in line:
-                    parts = line.split(':', 1)
-                    if len(parts) > 1:
-                        ssid = parts[1].strip()
-                        if ssid:
-                            return ssid
-            return None
-        except:
-            return None
-    
-    def dual_scan_wifi(self, monitor_num):
-        """Escaneia redes WiFi e preenche o combobox do monitor específico"""
-        if monitor_num == 1:
-            combo = self.dual_wifi1_combo
-            combo.set('🔍 Escaneando...')
-        else:
-            combo = self.dual_wifi2_combo
-            combo.set('🔍 Escaneando...')
-        
-        def scan_thread():
-            try:
-                # Detecta interface WiFi
-                interface_result = subprocess.run(
-                    ['netsh', 'wlan', 'show', 'interfaces'],
-                    capture_output=True,
-                    text=True,
-                    encoding='cp850',
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-                
-                wifi_interface = "Wi-Fi"
-                for line in interface_result.stdout.split('\n'):
-                    if 'Nome' in line and ':' in line:
-                        parts = line.split(':', 1)
-                        if len(parts) > 1:
-                            wifi_interface = parts[1].strip()
-                            break
-                
-                # Força múltiplos scans
-                for i in range(3):
-                    subprocess.run(
-                        ['netsh', 'wlan', 'show', 'networks', f'interface={wifi_interface}'],
-                        capture_output=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                    time.sleep(0.5)
-                
-                # Pega lista final de redes
-                result = subprocess.run(
-                    ['netsh', 'wlan', 'show', 'networks', f'interface={wifi_interface}'],
-                    capture_output=True,
-                    text=True,
-                    encoding='cp850',
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-                
-                # Extrai SSIDs
-                networks = []
-                for line in result.stdout.split('\n'):
-                    if 'SSID' in line and ':' in line and 'BSSID' not in line:
-                        parts = line.split(':', 1)
-                        if len(parts) > 1:
-                            ssid = parts[1].strip()
-                            if ssid and ssid not in networks:
-                                networks.append(ssid)
-                
-                # Atualiza UI na thread principal
-                self.root.after(0, lambda: combo.config(values=networks))
-                self.root.after(0, lambda: combo.set('✅ Selecione uma rede'))
-                
-                if not networks:
-                    self.root.after(0, lambda: messagebox.showwarning(
-                        "Aviso", 
-                        f"Nenhuma rede WiFi encontrada.\nVerifique se o WiFi está ativado."))
-                
-            except Exception as e:
-                self.root.after(0, lambda: combo.set('❌ Erro no scan'))
-                self.root.after(0, lambda: messagebox.showerror("Erro", f"Erro ao escanear WiFi: {e}"))
-        
-        threading.Thread(target=scan_thread, daemon=True).start()
-    
-    def dual_start_monitor(self, monitor_num):
-        """Inicia monitoramento de um WiFi específico (1 ou 2)"""
-        try:
-            if monitor_num == 1:
-                wifi_ssid = self.dual_wifi1_combo.get().strip()
-                server = self.dual_server1_combo.get()
-                interval = float(self.dual_interval1_spin.get())
-                status_label = self.dual_status1_label
-                start_btn = self.dual_start1_btn
-                stop_btn = self.dual_stop1_btn
-            else:
-                wifi_ssid = self.dual_wifi2_combo.get().strip()
-                server = self.dual_server2_combo.get()
-                interval = float(self.dual_interval2_spin.get())
-                status_label = self.dual_status2_label
-                start_btn = self.dual_start2_btn
-                stop_btn = self.dual_stop2_btn
-            
-            # Validações de SSID
-            if not wifi_ssid:
-                messagebox.showerror("Erro", f"Selecione uma rede WiFi para o Monitor {monitor_num}")
-                return
-            
-            if wifi_ssid.startswith('🔍') or wifi_ssid.startswith('✅') or wifi_ssid.startswith('❌'):
-                messagebox.showerror("Erro", 
-                    f"Selecione uma rede WiFi válida!\n\n"
-                    f"Clique no botão 🔍 para escanear as redes disponíveis.")
-                return
-            
-            # Salva WiFi original na primeira inicialização
-            if not self.dual_original_wifi:
-                self.dual_original_wifi = self.dual_get_current_wifi()
-                if self.dual_original_wifi:
-                    messagebox.showinfo("WiFi Original Salvo", 
-                        f"📡 WiFi atual: {self.dual_original_wifi}\n\n"
-                        f"Será restaurado ao parar o monitoramento.",
-                        parent=self.root)
-            
-            # Atualiza configurações do monitor principal com valores da GUI ANTES de copiar
-            self.monitor.alert_threshold = float(self.alert_threshold_spin.get())
-            self.monitor.anomaly_min_pings = int(self.anomaly_min_pings_spin.get())
-            self.monitor.anomaly_min_increase_percent = float(self.anomaly_min_increase_spin.get())
-            self.monitor.anomaly_deviation_multiplier = float(self.anomaly_deviation_spin.get())
-            self.monitor.anomaly_min_consecutive_normal = int(self.anomaly_buffer_spin.get())
-            
-            # Cria monitor SEMPRE NOVO (force_new=True) para permitir mesmo SSID em ambos
-            monitor = self.dual_monitor_manager.add_monitor(
-                wifi_ssid, 
-                server, 
-                interval,
-                main_monitor=self.monitor,  # Passa configurações ATUALIZADAS
-                force_new=True  # CRÍTICO: Sempre cria novo monitor independente
-            )
-            self.dual_monitors[monitor_num] = monitor
-            
-            # Inicia monitoramento diretamente no monitor (não via manager)
-            callback = lambda data: self.dual_on_monitor_data(monitor_num, data)
-            monitor.start_monitoring(callback)
-            success = True
-            
-            if success:
-                status_label.config(text=f'🟢 Monitorando', foreground='#3fb950')
-                start_btn.config(state='disabled')
-                stop_btn.config(state='normal')
-                messagebox.showinfo("Sucesso", 
-                    f"✅ Monitoramento iniciado para: {wifi_ssid}\n"
-                    f"Thread dedicada criada!\n"
-                    f"Servidor: {server}\n"
-                    f"Intervalo: {interval}s")
-            
-        except Exception as e:
-            messagebox.showerror("Erro", f"Erro ao iniciar monitor {monitor_num}: {e}")
-    
-    def dual_stop_monitor(self, monitor_num):
-        """Para monitoramento de um WiFi específico"""
-        try:
-            if monitor_num == 1:
-                status_label = self.dual_status1_label
-                start_btn = self.dual_start1_btn
-                stop_btn = self.dual_stop1_btn
-            else:
-                status_label = self.dual_status2_label
-                start_btn = self.dual_start2_btn
-                stop_btn = self.dual_stop2_btn
-            
-            # Para monitor diretamente (não via manager)
-            monitor = self.dual_monitors.get(monitor_num)
-            if monitor:
-                monitor.stop_monitoring()
-                self.dual_monitors[monitor_num] = None
-                
-                status_label.config(text='⚪ Parado', foreground='#8b92a8')
-                start_btn.config(state='normal')
-                stop_btn.config(state='disabled')
-                
-                # Verifica se AMBOS os monitores estão parados
-                both_stopped = (
-                    self.dual_monitors[1] is None and 
-                    self.dual_monitors[2] is None
-                )
-                
-                # Se ambos pararam e tem WiFi original salvo, oferece reconexão
-                if both_stopped and self.dual_original_wifi:
-                    response = messagebox.askyesno("Reconectar WiFi Original?", 
-                        f"🔄 Ambos os monitores foram parados.\n\n"
-                        f"Deseja reconectar ao WiFi original?\n"
-                        f"📡 Rede: {self.dual_original_wifi}",
-                        parent=self.root)
-                    
-                    if response:
-                        try:
-                            subprocess.run(
-                                ['netsh', 'wlan', 'connect', f'name={self.dual_original_wifi}'],
-                                capture_output=True,
-                                creationflags=subprocess.CREATE_NO_WINDOW
-                            )
-                            messagebox.showinfo("Reconectando", 
-                                f"✅ Reconectando a: {self.dual_original_wifi}\n\n"
-                                f"Aguarde alguns segundos...",
-                                parent=self.root)
-                        except Exception as e:
-                            messagebox.showerror("Erro", f"Erro ao reconectar: {e}", parent=self.root)
-                    
-                    self.dual_original_wifi = None  # Limpa variável
-                
-        except Exception as e:
-            messagebox.showerror("Erro", f"Erro ao parar monitor {monitor_num}: {e}")
-    
-    def dual_start_both(self):
-        """Inicia ambos os monitores simultaneamente"""
-        # Salva WiFi original antes de começar
-        if not self.dual_original_wifi:
-            self.dual_original_wifi = self.dual_get_current_wifi()
-            if self.dual_original_wifi:
-                messagebox.showinfo("WiFi Original Salvo", 
-                    f"📡 WiFi atual detectado: {self.dual_original_wifi}\n\n"
-                    f"Esta rede será restaurada quando você parar o monitoramento.")
-        
-        self.dual_start_monitor(1)
-        time.sleep(0.5)  # Pequeno delay entre inicializações
-        self.dual_start_monitor(2)
-    
-    def dual_stop_both(self):
-        """Para ambos os monitores e reconecta à rede original"""
-        self.dual_stop_monitor(1)
-        self.dual_stop_monitor(2)
-        
-        # Reconecta à rede original
-        if self.dual_original_wifi:
-            response = messagebox.askyesno("Reconectar WiFi Original?", 
-                f"🔄 Deseja reconectar ao WiFi original?\n\n"
-                f"📡 Rede: {self.dual_original_wifi}\n\n"
-                f"Clique 'Sim' para reconectar automaticamente.")
-            
-            if response:
-                try:
-                    subprocess.run(
-                        ['netsh', 'wlan', 'connect', f'name={self.dual_original_wifi}'],
-                        capture_output=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                    messagebox.showinfo("Reconectando", 
-                        f"✅ Reconectando a: {self.dual_original_wifi}\n\n"
-                        f"Aguarde alguns segundos...")
-                except Exception as e:
-                    messagebox.showerror("Erro", f"Erro ao reconectar: {e}")
-            
-            self.dual_original_wifi = None  # Limpa variável
-    
-    def dual_on_monitor_data(self, monitor_num, data):
-        """Callback para dados de monitoramento (chamado pelas threads)"""
-        # Este callback é chamado a cada ping
-        # Não fazemos nada aqui porque dual_update_stats() já atualiza tudo periodicamente
-        pass
-    
-    def dual_update_graph(self, monitor_num):
-        """Atualiza o gráfico de latência de um monitor específico"""
-        try:
-            monitor = self.dual_monitors.get(monitor_num)
-            if not monitor or not monitor.monitoring:
-                return
-            
-            if monitor_num == 1:
-                ax = self.dual_ax1
-                canvas = self.dual_canvas1
-                color = '#58a6ff'  # Azul para WiFi 1
-            else:
-                ax = self.dual_ax2
-                canvas = self.dual_canvas2
-                color = '#3fb950'  # Verde para WiFi 2
-            
-            # Pega dados de latência
-            latencies = list(monitor.ping_history)
-            
-            if not latencies or len(latencies) == 0:
-                return
-            
-            # Limpa e redesenha
-            ax.clear()
-            
-            # Plot com cor específica
-            ax.plot(latencies, color=color, linewidth=2, marker='o', markersize=3, alpha=0.8)
-            
-            # Linha de threshold de anomalia (igual ao monitor principal)
-            threshold = monitor.anomaly_threshold
-            ax.axhline(y=threshold, color='#f85149', linestyle='--', linewidth=2, alpha=0.8, 
-                      label=f'Limiar de Anomalia: {threshold}ms')
-            
-            # Linha de média (opcional, mais discreta)
-            if len(latencies) > 1:
-                avg = sum(latencies) / len(latencies)
-                ax.axhline(y=avg, color='#f97316', linestyle=':', linewidth=1, alpha=0.5, label=f'Média: {avg:.1f}ms')
-            
-            ax.legend(loc='upper right', fontsize=8, framealpha=0.3, facecolor='#0f1419', edgecolor=color)
-            
-            # Reaplica estilo
-            ax.set_xlabel('Tempo (pings)', color='#e1e4e8', fontsize=9, fontweight='bold')
-            ax.set_ylabel('Latência (ms)', color='#e1e4e8', fontsize=9, fontweight='bold')
-            ax.tick_params(colors='#e1e4e8', labelsize=8)
-            ax.grid(True, alpha=0.2, linestyle='--', linewidth=0.8, color=color)
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            ax.spines['left'].set_color(color)
-            ax.spines['bottom'].set_color(color)
-            ax.set_facecolor('#0f1419')
-            
-            canvas.draw()
-            
-        except Exception as e:
-            pass
-    
-    def dual_update_stats(self):
-        """Atualiza estatísticas dos monitores periodicamente"""
-        try:
-            # Monitor 1
-            monitor1 = self.dual_monitors.get(1)
-            if monitor1 and monitor1.monitoring:
-                # Debug: verifica se há dados
-                if len(monitor1.ping_history) == 0:
-                    self.dual_stats1_text.delete('1.0', tk.END)
-                    self.dual_stats1_text.insert('1.0', '⏳ Coletando dados...')
-                    self.dual_anomaly1_label.config(text='⏳ Aguardando pings...', foreground='#8b92a8')
-                    self.dual_update_graph(1)
-                else:
-                    stats = monitor1.stats
-                    text = f"📊 STATS | Pings: {stats['total_pings']} | "
-                    text += f"✅ {stats['successful_pings']} | ❌ {stats['failed_pings']}\n"
-                    text += f"⚡ Min: {stats['min_latency']:.1f}ms | Max: {stats['max_latency']:.1f}ms | "
-                    text += f"Avg: {stats['avg_latency']:.1f}ms\n"
-                    text += f"📦 Perda: {stats['packet_loss']:.2f}% | "
-                    text += f"🚨 Anomalias: {len(monitor1.detected_anomalies)}"
-                    
-                    self.dual_stats1_text.delete('1.0', tk.END)
-                    self.dual_stats1_text.insert('1.0', text)
-                    
-                    # Atualiza label de anomalias
-                    if len(monitor1.detected_anomalies) > 0:
-                        self.dual_anomaly1_label.config(
-                            text=f'🚨 {len(monitor1.detected_anomalies)} anomalia(s) detectada(s)',
-                            foreground='#f97316'
-                        )
-                    else:
-                        self.dual_anomaly1_label.config(text='✅ Sem anomalias', foreground='#3fb950')
-                    
-                    # Atualiza gráfico
-                    self.dual_update_graph(1)
-            
-            # Monitor 2
-            monitor2 = self.dual_monitors.get(2)
-            if monitor2 and monitor2.monitoring:
-                # Debug: verifica se há dados
-                if len(monitor2.ping_history) == 0:
-                    self.dual_stats2_text.delete('1.0', tk.END)
-                    self.dual_stats2_text.insert('1.0', '⏳ Coletando dados...')
-                    self.dual_anomaly2_label.config(text='⏳ Aguardando pings...', foreground='#8b92a8')
-                    self.dual_update_graph(2)
-                else:
-                    stats = monitor2.stats
-                    text = f"📊 STATS | Pings: {stats['total_pings']} | "
-                    text += f"✅ {stats['successful_pings']} | ❌ {stats['failed_pings']}\n"
-                    text += f"⚡ Min: {stats['min_latency']:.1f}ms | Max: {stats['max_latency']:.1f}ms | "
-                    text += f"Avg: {stats['avg_latency']:.1f}ms\n"
-                    text += f"📦 Perda: {stats['packet_loss']:.2f}% | "
-                    text += f"🚨 Anomalias: {len(monitor2.detected_anomalies)}"
-                    
-                    self.dual_stats2_text.delete('1.0', tk.END)
-                    self.dual_stats2_text.insert('1.0', text)
-                    
-                    # Atualiza label de anomalias
-                    if len(monitor2.detected_anomalies) > 0:
-                        self.dual_anomaly2_label.config(
-                            text=f'🚨 {len(monitor2.detected_anomalies)} anomalia(s) detectada(s)',
-                            foreground='#f97316'
-                        )
-                    else:
-                        self.dual_anomaly2_label.config(text='✅ Sem anomalias', foreground='#3fb950')
-                    
-                    # Atualiza gráfico
-                    self.dual_update_graph(2)
-                
-        except Exception as e:
-            pass
-        
-        # Agenda próxima atualização
-        self.root.after(1000, self.dual_update_stats)
-    
     def create_wifi_tab(self):
         """Aba para testar múltiplas redes WiFi automaticamente"""
         import re
@@ -2220,8 +1641,7 @@ class MonitorGUI:
                 capture_output=True,
                 text=True,
                 encoding='cp850',
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=3
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
             
             for line in result.stdout.split('\n'):
