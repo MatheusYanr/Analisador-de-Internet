@@ -1,5 +1,0 @@
-Data,Hora_Inicio,Hora_Fim,Duracao_Segundos,Latencia_Media_Pico,Latencia_Min_Pico,Latencia_Max_Pico,Pings_Afetados,Numero_Ping_Inicio,Metodo_Deteccao,Baseline_Media,Baseline_Min,Baseline_Max,Aumento_Percentual
-2025-10-13,17:33:25,17:34:22,57.05,21.67,12.00,180.00,48,87,"desvio estatístico (média=14.2ms, limite=27.0ms)",14.24,12.00,42.00,52.2%
-2025-10-13,18:05:37,18:06:05,28.02,17.21,12.00,34.00,19,88,"desvio estatístico (média=13.4ms, limite=21.2ms)",13.26,12.00,25.00,29.8%
-2025-10-13,18:06:50,18:07:05,14.98,22.50,12.00,42.00,6,161,"desvio estatístico (média=14.3ms, limite=26.2ms)",15.24,12.00,46.00,47.6%
-2025-10-13,18:08:26,18:08:41,14.97,25.17,13.00,48.00,6,257,"desvio estatístico (média=15.3ms, limite=27.7ms)",15.72,13.00,48.00,60.1%
