@@ -72,7 +72,9 @@ class NetworkMonitor:
         self.log_file = 'logs/network_monitor_log.csv'
         self.anomaly_file = 'logs/anomalias_detectadas.csv'
         self.current_wifi_ssid = None  # WiFi atual sendo monitorado
+        self.wifi_ssid = None  # ✅ ADICIONADO: SSID do WiFi monitorado (usado em logs)
         self.last_known_wifi = None  # Último WiFi conectado (para reconexão)
+        self.enable_wifi_reconnect = True  # ✅ ADICIONADO: Habilita reconexão automática
         self.enable_alerts = True
         self.enable_sound_alerts = True
         self.enable_auto_export = True
@@ -274,10 +276,18 @@ class NetworkMonitor:
         self.stats['start_time'] = datetime.now()
         consecutive_failures = 0
         ping_counter = 0  # Contador para verificação periódica de WiFi
+        loop_iteration = 0  # Debug: contador de iterações
+        
+        print(f"🔄 Loop iniciado para {self.wifi_ssid or 'monitor padrão'}")
         
         while self.monitoring:
             try:
+                loop_iteration += 1
                 start_time = time.time()
+                
+                # Debug: log a cada 10 iterações
+                if loop_iteration % 10 == 0:
+                    print(f"✓ Loop ativo ({self.wifi_ssid or 'padrão'}): {loop_iteration} iterações")
                 
                 # Verifica reconexão WiFi a cada 10 pings
                 ping_counter += 1
@@ -361,8 +371,12 @@ class NetworkMonitor:
                 time.sleep(sleep_time)
                 
             except Exception as e:
-                print(f"Erro no loop de monitoramento: {e}")
+                print(f"❌ ERRO no loop de monitoramento ({self.wifi_ssid or 'padrão'}): {e}")
+                import traceback
+                traceback.print_exc()
                 time.sleep(self.interval)
+        
+        print(f"⏹️ Loop finalizado para {self.wifi_ssid or 'monitor padrão'} (total: {loop_iteration} iterações)")
     
     def log_to_file(self, timestamp, latency):
         """
