@@ -73,23 +73,10 @@ class NetworkMonitor:
         
         self.config_file = 'network_monitor_config.json'
         self.log_file = 'logs/network_monitor_log.csv'
-        
-        # Configura arquivo de anomalias baseado no WiFi SSID (se fornecido)
-        if wifi_ssid:
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            safe_ssid = "".join(c for c in wifi_ssid if c.isalnum() or c in (' ', '_', '-')).strip()
-            safe_ssid = safe_ssid.replace(' ', '_')
-            self.anomaly_file = f'logs/anomalias_{safe_ssid}_{date_str}.csv'
-            self.current_wifi_ssid = wifi_ssid
-        else:
-            self.anomaly_file = 'logs/anomalias_detectadas.csv'
-            self.current_wifi_ssid = None
-        
-        self.last_known_wifi = None  # Último WiFi conectado (para reconexão)
+        self.anomaly_file = 'logs/anomalias_detectadas.csv'
         self.enable_alerts = True
         self.enable_sound_alerts = True
         self.enable_auto_export = True
-        self.enable_wifi_reconnect = True  # Auto-reconectar se desconectar
         
         # Sistema de detecção de anomalias
         self.anomaly_threshold = 100  # ms - threshold fixo
@@ -97,7 +84,6 @@ class NetworkMonitor:
         self.anomaly_min_samples = 30  # Mínimo de pings para calcular desvio
         self.anomaly_min_consecutive_normal = 10  # Pings normais necessários para fechar anomalia
         self.anomaly_min_pings = 5  # FILTRO: Mínimo de pings afetados para registrar anomalia
-        self.anomaly_min_increase_percent = 50.0  # FILTRO: Mínimo 50% de aumento para ser anomalia real
         self.anomaly_window = []  # Pings durante anomalia
         self.anomaly_normal_buffer = []  # Buffer de pings normais temporários
         self.in_anomaly = False
@@ -154,99 +140,6 @@ class NetworkMonitor:
             print(f"Erro ao detectar gateway: {e}")
             return None
     
-    def update_anomaly_filename_with_wifi(self):
-        """Atualiza nome do arquivo de anomalias incluindo o WiFi atual"""
-        try:
-            # Tenta detectar WiFi conectado
-            result = subprocess.run(
-                ['netsh', 'wlan', 'show', 'interfaces'],
-                capture_output=True,
-                text=True,
-                encoding='cp850',
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=3
-            )
-            
-            current_ssid = None
-            for line in result.stdout.split('\n'):
-                if 'SSID' in line and ':' in line and 'BSSID' not in line:
-                    ssid = line.split(':', 1)[1].strip()
-                    if ssid:
-                        current_ssid = ssid
-                        break
-            
-            # Atualiza arquivo de anomalias com nome do WiFi
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            
-            if current_ssid:
-                self.current_wifi_ssid = current_ssid
-                self.last_known_wifi = current_ssid
-                # Remove caracteres inválidos para nome de arquivo
-                safe_ssid = "".join(c for c in current_ssid if c.isalnum() or c in (' ', '_', '-')).strip()
-                safe_ssid = safe_ssid.replace(' ', '_')
-                self.anomaly_file = f'logs/anomalias_{safe_ssid}_{date_str}.csv'
-                print(f"📊 Arquivo de anomalias: {self.anomaly_file}")
-            else:
-                # Sem WiFi - usa arquivo padrão com Ethernet ou cabo
-                self.current_wifi_ssid = None
-                self.anomaly_file = f'logs/anomalias_ETHERNET_{date_str}.csv'
-                print(f"🔌 Monitorando via cabo - Arquivo: {self.anomaly_file}")
-                
-        except Exception as e:
-            print(f"Erro ao atualizar arquivo de anomalias: {e}")
-            # Fallback para arquivo padrão
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            self.anomaly_file = f'logs/anomalias_DESCONHECIDO_{date_str}.csv'
-    
-    def check_and_reconnect_wifi(self):
-        """Verifica se WiFi desconectou e tenta reconectar"""
-        if not self.enable_wifi_reconnect or not self.last_known_wifi:
-            return
-        
-        try:
-            # Verifica se ainda está conectado ao mesmo WiFi
-            result = subprocess.run(
-                ['netsh', 'wlan', 'show', 'interfaces'],
-                capture_output=True,
-                text=True,
-                encoding='cp850',
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=3  # Timeout de 3 segundos para evitar travamento
-            )
-            
-            current_ssid = None
-            for line in result.stdout.split('\n'):
-                if 'SSID' in line and ':' in line and 'BSSID' not in line:
-                    ssid = line.split(':', 1)[1].strip()
-                    if ssid:
-                        current_ssid = ssid
-                        break
-            
-            # Se desconectou do WiFi que estava sendo monitorado
-            if not current_ssid or current_ssid != self.last_known_wifi:
-                print(f"⚠️ WiFi desconectado! Era: '{self.last_known_wifi}', Agora: '{current_ssid or 'DESCONECTADO'}'")
-                print(f"🔄 Tentando reconectar ao '{self.last_known_wifi}'...")
-                
-                # Tenta reconectar
-                reconnect_result = subprocess.run(
-                    ['netsh', 'wlan', 'connect', f'name={self.last_known_wifi}'],
-                    capture_output=True,
-                    text=True,
-                    encoding='cp850',
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    timeout=5  # Timeout de 5 segundos
-                )
-                
-                if 'solicitação de conexão foi concluída com êxito' in reconnect_result.stdout.lower():
-                    print(f"✅ Reconectado com sucesso ao '{self.last_known_wifi}'!")
-                    time.sleep(2)  # Aguarda estabilização
-                    self.update_anomaly_filename_with_wifi()  # Atualiza nome do arquivo
-                else:
-                    print(f"❌ Falha ao reconectar: {reconnect_result.stdout}")
-                    
-        except Exception as e:
-            print(f"Erro ao verificar/reconectar WiFi: {e}")
-    
     def save_config(self):
         try:
             config = {
@@ -291,25 +184,11 @@ class NetworkMonitor:
     def monitor_loop(self, callback):
         self.stats['start_time'] = datetime.now()
         consecutive_failures = 0
-        ping_counter = 0  # Contador para verificação periódica de WiFi
-        loop_iteration = 0  # Debug: contador de iterações
-        
-        print(f"🔄 Loop iniciado para {self.wifi_ssid or 'monitor padrão'}")
         
         while self.monitoring:
             try:
                 loop_iteration += 1
                 start_time = time.time()
-                
-                # Debug: log a cada 10 iterações
-                if loop_iteration % 10 == 0:
-                    print(f"✓ Loop ativo ({self.wifi_ssid or 'padrão'}): {loop_iteration} iterações")
-                
-                # Verifica reconexão WiFi a cada 10 pings
-                ping_counter += 1
-                if ping_counter >= 10:
-                    self.check_and_reconnect_wifi()
-                    ping_counter = 0
                 
                 latency = self.ping_host(self.current_server)
                 timestamp = datetime.now()
@@ -455,16 +334,6 @@ class NetworkMonitor:
     def start_monitoring(self, callback):
         if not self.monitoring:
             self.monitoring = True
-            if not self.wifi_ssid:
-                # Atualiza automaticamente usando SSID atual detectado
-                self.update_anomaly_filename_with_wifi()
-            else:
-                # Garante que o arquivo tem a data corrente ao iniciar
-                current_date = datetime.now().strftime('%Y-%m-%d')
-                if current_date not in self.anomaly_file:
-                    safe_ssid = "".join(c for c in self.wifi_ssid if c.isalnum() or c in (' ', '_', '-')).strip()
-                    safe_ssid = safe_ssid.replace(' ', '_')
-                    self.anomaly_file = f'logs/anomalias_{safe_ssid}_{current_date}.csv'
             thread = threading.Thread(target=self.monitor_loop, args=(callback,), daemon=True)
             thread.start()
     
@@ -550,44 +419,31 @@ class NetworkMonitor:
                     
                     pings_affected = len(self.anomaly_window)
                     
-                    # Calcula métricas primeiro
-                    end_time = timestamp
-                    duration = (end_time - self.anomaly_start_time).total_seconds()
-                    avg_latency_anomaly = statistics.mean(self.anomaly_window)
-                    max_latency_anomaly = max(self.anomaly_window)
-                    min_latency_anomaly = min(self.anomaly_window)
-                    
-                    # Calcula baseline (latência normal ANTES da anomalia)
-                    baseline_avg = 0
-                    baseline_min = 0
-                    baseline_max = 0
-                    increase_percent = 0
-                    
-                    if len(self.baseline_latencies) >= 10:
-                        # Usa últimas 50 latências normais como baseline
-                        baseline_list = list(self.baseline_latencies)[-50:]
-                        baseline_avg = statistics.mean(baseline_list)
-                        baseline_min = min(baseline_list)
-                        baseline_max = max(baseline_list)
+                    # FILTRO: Só registra anomalias com mínimo de pings afetados (padrão: 5)
+                    if pings_affected >= self.anomaly_min_pings:
+                        end_time = timestamp
+                        duration = (end_time - self.anomaly_start_time).total_seconds()
+                        avg_latency_anomaly = statistics.mean(self.anomaly_window)
+                        max_latency_anomaly = max(self.anomaly_window)
+                        min_latency_anomaly = min(self.anomaly_window)
                         
-                        # Calcula quanto aumentou em %
-                        if baseline_avg > 0:
-                            increase_percent = ((avg_latency_anomaly - baseline_avg) / baseline_avg) * 100
-                    
-                    # FILTRO 1: Mínimo de pings afetados
-                    if pings_affected < self.anomaly_min_pings:
-                        print(f"⏭️ Anomalia descartada: apenas {pings_affected} ping(s) afetado(s) - mínimo necessário: {self.anomaly_min_pings}")
-                    
-                    # FILTRO 2: Aumento percentual mínimo (50%)
-                    elif increase_percent > 0 and increase_percent < self.anomaly_min_increase_percent:
-                        print(f"⏭️ Anomalia descartada: apenas +{increase_percent:.1f}% de aumento - mínimo necessário: {self.anomaly_min_increase_percent}% (variação normal)")
-                    
-                    # FILTRO 3: Latência absoluta muito baixa (< 100ms) E aumento pequeno
-                    elif avg_latency_anomaly < self.anomaly_threshold and increase_percent < self.anomaly_min_increase_percent:
-                        print(f"⏭️ Anomalia descartada: latência {avg_latency_anomaly:.1f}ms com +{increase_percent:.1f}% não é problemática")
-                    
-                    # PASSA TODOS OS FILTROS: Registra anomalia real
-                    else:
+                        # Calcula baseline (latência normal ANTES da anomalia)
+                        baseline_avg = 0
+                        baseline_min = 0
+                        baseline_max = 0
+                        increase_percent = 0
+                        
+                        if len(self.baseline_latencies) >= 10:
+                            # Usa últimas 50 latências normais como baseline
+                            baseline_list = list(self.baseline_latencies)[-50:]
+                            baseline_avg = statistics.mean(baseline_list)
+                            baseline_min = min(baseline_list)
+                            baseline_max = max(baseline_list)
+                            
+                            # Calcula quanto aumentou em %
+                            if baseline_avg > 0:
+                                increase_percent = ((avg_latency_anomaly - baseline_avg) / baseline_avg) * 100
+                        
                         anomaly_data = {
                             'start_time': self.anomaly_start_time,
                             'end_time': end_time,
@@ -610,6 +466,9 @@ class NetworkMonitor:
                         baseline_info = f"{baseline_avg:.1f}ms" if baseline_avg > 0 else "N/A"
                         increase_info = f"+{increase_percent:.1f}%" if increase_percent > 0 else ""
                         print(f"✅ Anomalia registrada: {duration:.1f}s, {pings_affected} pings, média {avg_latency_anomaly:.1f}ms (baseline: {baseline_info} {increase_info})")
+                    else:
+                        # Anomalia muito curta - descarta
+                        print(f"⏭️ Anomalia descartada: apenas {pings_affected} ping(s) afetado(s) - mínimo necessário: {self.anomaly_min_pings}")
                     
                     # Limpa buffers
                     self.anomaly_window = []
@@ -618,21 +477,6 @@ class NetworkMonitor:
     def save_anomaly(self, anomaly_data):
         """Salva anomalia detectada em arquivo CSV"""
         try:
-            # Verifica se a data mudou e atualiza o nome do arquivo
-            current_date = datetime.now().strftime('%Y-%m-%d')
-            if self.wifi_ssid and current_date not in self.anomaly_file:
-                # Data mudou (passou da meia-noite) - atualiza arquivo
-                safe_ssid = "".join(c for c in self.wifi_ssid if c.isalnum() or c in (' ', '_', '-')).strip()
-                safe_ssid = safe_ssid.replace(' ', '_')
-                self.anomaly_file = f'logs/anomalias_{safe_ssid}_{current_date}.csv'
-                print(f"📅 Data mudou! Novo arquivo: {self.anomaly_file}")
-            
-            # Garante que o diretório logs existe
-            if not os.path.exists('logs'):
-                os.makedirs('logs')
-                print(f"📁 Diretório 'logs/' criado!")
-            
-            print(f"💾 Salvando anomalia em: {self.anomaly_file}")
             file_exists = os.path.exists(self.anomaly_file)
             with open(self.anomaly_file, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -643,7 +487,6 @@ class NetworkMonitor:
                         'Pings_Afetados', 'Numero_Ping_Inicio', 'Metodo_Deteccao', 
                         'Baseline_Media', 'Baseline_Min', 'Baseline_Max', 'Aumento_Percentual'
                     ])
-                    print(f"📄 Arquivo criado: {self.anomaly_file}")
                 
                 writer.writerow([
                     anomaly_data['start_time'].strftime('%Y-%m-%d'),
@@ -661,11 +504,8 @@ class NetworkMonitor:
                     f"{anomaly_data.get('baseline_max', 0):.2f}" if anomaly_data.get('baseline_max', 0) > 0 else 'N/A',
                     f"{anomaly_data.get('increase_percent', 0):.1f}%" if anomaly_data.get('increase_percent', 0) > 0 else 'N/A'
                 ])
-                print(f"✅ Anomalia salva com sucesso!")
         except Exception as e:
-            print(f"❌ Erro ao salvar anomalia: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Erro ao salvar anomalia: {e}")
     
     def load_anomalies(self):
         """Carrega anomalias já detectadas do arquivo"""
@@ -756,163 +596,18 @@ class NetworkMonitor:
             return []
 
 
-class DualWiFiMonitorManager:
-    """
-    Gerenciador de monitoramento dual de WiFi.
-    Permite monitorar 2 redes WiFi simultaneamente usando threads.
-    """
-    def __init__(self):
-        self.monitors = {}  # {wifi_ssid: NetworkMonitor}
-        self.monitor_threads = {}  # {wifi_ssid: Thread}
-        self.lock = threading.Lock()
-        
-    def add_monitor(self, wifi_ssid, server='8.8.8.8', interval=1.0, main_monitor=None, force_new=False):
-        """Adiciona um monitor para um WiFi específico com configurações do monitor principal"""
-        with self.lock:
-            # force_new=True: sempre cria novo monitor (para dual permitir mesmo SSID em ambos)
-            if wifi_ssid not in self.monitors or force_new:
-                monitor = NetworkMonitor(
-                    monitor_id=f"wifi_{wifi_ssid}_{len(self.monitors)}", 
-                    wifi_ssid=wifi_ssid
-                )
-                monitor.current_server = server
-                monitor.interval = interval
-                
-                # Configura nome do arquivo de anomalias com SSID e data
-                date_str = datetime.now().strftime('%Y-%m-%d')
-                safe_ssid = "".join(c for c in wifi_ssid if c.isalnum() or c in (' ', '_', '-')).strip()
-                safe_ssid = safe_ssid.replace(' ', '_')
-                monitor.anomaly_file = f'logs/anomalias_{safe_ssid}_{date_str}.csv'
-                monitor.current_wifi_ssid = wifi_ssid
-                
-                # CRÍTICO: Desabilita reconexão automática no dual monitor
-                monitor.enable_wifi_reconnect = False  # NÃO tenta reconectar automaticamente
-                monitor.last_known_wifi = None  # Não tenta lembrar WiFi
-                
-                # Copia TODAS as configurações de anomalia do monitor principal
-                if main_monitor:
-                    monitor.anomaly_threshold = main_monitor.anomaly_threshold
-                    monitor.anomaly_min_increase_percent = main_monitor.anomaly_min_increase_percent
-                    monitor.anomaly_min_pings = main_monitor.anomaly_min_pings
-                    monitor.anomaly_deviation_multiplier = main_monitor.anomaly_deviation_multiplier
-                    monitor.anomaly_min_samples = main_monitor.anomaly_min_samples
-                    monitor.anomaly_min_consecutive_normal = main_monitor.anomaly_min_consecutive_normal
-                    # Alertas sonoros DESABILITADOS por padrão no dual monitor (menos intrusivo)
-                    monitor.enable_sound_alerts = False
-                    monitor.enable_alerts = True  # Apenas registra, sem som
-                
-                # Para dual monitor, usa chave única (wifi_ssid + contador)
-                if force_new:
-                    unique_key = f"{wifi_ssid}_monitor_{len(self.monitors)}"
-                    self.monitors[unique_key] = monitor
-                else:
-                    self.monitors[wifi_ssid] = monitor
-                    
-                print(f"✅ Monitor criado para WiFi: {wifi_ssid}")
-                print(f"   └─ Arquivo de anomalias: {monitor.anomaly_file}")
-                print(f"   └─ Anomalia threshold: {monitor.anomaly_threshold}ms")
-                print(f"   └─ Aumento mínimo: {monitor.anomaly_min_increase_percent}%")
-                print(f"   └─ Mínimo de pings: {monitor.anomaly_min_pings}")
-                print(f"   └─ Alertas sonoros: DESABILITADOS (menos intrusivo)")
-                return monitor
-            return self.monitors[wifi_ssid]
-    
-    def remove_monitor(self, wifi_ssid):
-        """Remove um monitor"""
-        with self.lock:
-            if wifi_ssid in self.monitors:
-                self.stop_monitor(wifi_ssid)
-                del self.monitors[wifi_ssid]
-                print(f"🗑️ Monitor removido: {wifi_ssid}")
-    
-    def start_monitor(self, wifi_ssid, callback):
-        """Inicia monitoramento em thread dedicada"""
-        if wifi_ssid not in self.monitors:
-            print(f"❌ Monitor não encontrado: {wifi_ssid}")
-            return False
-        
-        monitor = self.monitors[wifi_ssid]
-        
-        if monitor.monitoring:
-            print(f"⚠️ Monitor já está rodando: {wifi_ssid}")
-            return False
-        
-        # Cria thread dedicada para este monitor
-        thread = threading.Thread(
-            target=self._monitor_thread_worker,
-            args=(wifi_ssid, callback),
-            daemon=True,
-            name=f"MonitorThread-{wifi_ssid}"
-        )
-        
-        self.monitor_threads[wifi_ssid] = thread
-        thread.start()
-        
-        print(f"🚀 Monitor iniciado em thread: {wifi_ssid} (Thread: {thread.name})")
-        return True
-    
-    def stop_monitor(self, wifi_ssid):
-        """Para monitoramento de um WiFi específico"""
-        if wifi_ssid in self.monitors:
-            monitor = self.monitors[wifi_ssid]
-            monitor.stop_monitoring()
-            
-            # Aguarda thread terminar
-            if wifi_ssid in self.monitor_threads:
-                thread = self.monitor_threads[wifi_ssid]
-                thread.join(timeout=2.0)
-                del self.monitor_threads[wifi_ssid]
-            
-            print(f"⏹️ Monitor parado: {wifi_ssid}")
-    
-    def stop_all(self):
-        """Para todos os monitores"""
-        for wifi_ssid in list(self.monitors.keys()):
-            self.stop_monitor(wifi_ssid)
-    
-    def _monitor_thread_worker(self, wifi_ssid, callback):
-        """Worker que roda em thread separada para cada monitor"""
-        monitor = self.monitors[wifi_ssid]
-        print(f"🔄 Thread worker iniciada para {wifi_ssid}")
-        
-        # Chama o método de monitoramento padrão
-        monitor.start_monitoring(callback)
-    
-    def get_monitor(self, wifi_ssid):
-        """Retorna monitor de um WiFi específico"""
-        return self.monitors.get(wifi_ssid)
-    
-    def get_all_monitors(self):
-        """Retorna todos os monitores"""
-        return self.monitors
-    
-    def is_monitoring(self, wifi_ssid):
-        """Verifica se um WiFi está sendo monitorado"""
-        if wifi_ssid in self.monitors:
-            return self.monitors[wifi_ssid].monitoring
-        return False
-
-
 class MonitorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Monitor de Rede Professional - v3.5.0")
-        self.root.geometry("1600x950")  # Janela maior para mais espaço
-        self.root.configure(bg='#0f1419')  # Fundo escuro premium
-        
-        # Ícone da janela (se existir)
-        try:
-            self.root.iconbitmap('icon.ico')
-        except:
-            pass
+        self.root.title("Monitor de Rede Professional - v2.0")
+        self.root.geometry("1400x900")
+        self.root.configure(bg='#1e1e1e')
         
         self.style = ttk.Style()
         self.style.theme_use('clam')
         self.configure_styles()
         
-        self.monitor = NetworkMonitor()  # Monitor padrão (compatibilidade)
-        self.dual_monitor_manager = DualWiFiMonitorManager()  # Gerenciador dual
-        
+        self.monitor = NetworkMonitor()
         # OTIMIZAÇÃO: Intervalo de atualização aumentado para 1000ms (menos lag)
         self.update_interval = 1000
         # Contador para atualização do gráfico (só atualiza a cada 5 ciclos)
@@ -924,196 +619,35 @@ class MonitorGUI:
         self.update_gui()
     
     def configure_styles(self):
-        # 🎨 Paleta de cores moderna (estilo Dark Mode Premium)
-        bg_dark = '#0f1419'        # Fundo principal escuro
-        bg_medium = '#1a1f2e'      # Cards e painéis
-        bg_light = '#252b3b'       # Hover e destaque
-        fg_primary = '#e1e4e8'     # Texto principal
-        fg_secondary = '#8b92a8'   # Texto secundário
-        accent_blue = '#58a6ff'    # Azul moderno
-        accent_green = '#3fb950'   # Verde sucesso
-        accent_red = '#f85149'     # Vermelho erro
-        accent_yellow = '#d29922'  # Amarelo alerta
-        accent_purple = '#bc8cff'  # Roxo destaque
+        bg_dark = '#1e1e1e'
+        bg_medium = '#2d2d2d'
+        fg_light = '#ffffff'
+        accent = '#007acc'
+        success = '#4ec9b0'
+        error = '#f48771'
         
-        # Frame base com fundo escuro premium
         self.style.configure('TFrame', background=bg_dark)
-        
-        # Labels com tipografia moderna
-        self.style.configure('TLabel', 
-            background=bg_dark, 
-            foreground=fg_primary, 
-            font=('Segoe UI', 10))
-        
-        # Título principal grande e impactante
-        self.style.configure('Title.TLabel', 
-            font=('Segoe UI', 20, 'bold'), 
-            foreground=accent_blue,
-            background=bg_dark)
-        
-        # Subtítulos para seções
-        self.style.configure('Subtitle.TLabel',
-            font=('Segoe UI', 12, 'bold'),
-            foreground=accent_purple,
-            background=bg_medium)
-        
-        # Labels de status com cores
-        self.style.configure('Success.TLabel',
-            foreground=accent_green,
-            font=('Segoe UI', 11, 'bold'))
-        
-        self.style.configure('Error.TLabel',
-            foreground=accent_red,
-            font=('Segoe UI', 11, 'bold'))
-        
-        self.style.configure('Warning.TLabel',
-            foreground=accent_yellow,
-            font=('Segoe UI', 11, 'bold'))
-        
-        self.style.configure('Info.TLabel',
-            foreground=accent_blue,
-            font=('Segoe UI', 11, 'bold'))
-        
-        # Botões modernos com mais padding
-        self.style.configure('TButton', 
-            font=('Segoe UI', 10, 'bold'),
-            borderwidth=0,
-            focuscolor='none',
-            padding=[15, 12],  # [horizontal, vertical]
-            relief='flat')
-        
-        self.style.map('TButton',
-            background=[('active', bg_light)],
-            relief=[('pressed', 'sunken')])
-        
-        # Botão de sucesso (verde)
-        self.style.configure('Success.TButton', 
-            foreground=accent_green,
-            font=('Segoe UI', 10, 'bold'))
-        
-        # Botão de perigo (vermelho)
-        self.style.configure('Danger.TButton', 
-            foreground=accent_red,
-            font=('Segoe UI', 10, 'bold'))
-        
-        # Botão primário (azul)
-        self.style.configure('Primary.TButton',
-            foreground=accent_blue,
-            font=('Segoe UI', 10, 'bold'))
-        
-        # Combobox moderno
-        self.style.configure('TCombobox', 
-            fieldbackground=bg_medium, 
-            background=bg_light,
-            foreground=fg_primary,
-            arrowcolor=accent_blue,
-            borderwidth=0)
-        
-        # Notebook (abas) moderno
-        self.style.configure('TNotebook', 
-            background=bg_dark, 
-            borderwidth=0,
-            tabmargins=[2, 5, 2, 0])
-        
-        self.style.configure('TNotebook.Tab', 
-            padding=[25, 12], 
-            font=('Segoe UI', 10, 'bold'),
-            background=bg_medium,
-            foreground=fg_secondary)
-        
-        self.style.map('TNotebook.Tab',
-            background=[('selected', bg_light)],
-            foreground=[('selected', accent_blue)],
-            expand=[('selected', [1, 1, 1, 0])])
-        
-        # LabelFrame moderno (cards com bordas arredondadas simuladas)
-        self.style.configure('TLabelframe', 
-            background=bg_medium,
-            foreground=fg_primary,
-            borderwidth=2,
-            relief='groove',  # Dá sensação de profundidade
-            bordercolor=bg_light)
-        
-        self.style.configure('TLabelframe.Label',
-            background=bg_medium,
-            foreground=accent_purple,
-            font=('Segoe UI', 11, 'bold'),
-            padding=[10, 5])
-        
-        # Spinbox
-        self.style.configure('TSpinbox',
-            fieldbackground=bg_medium,
-            background=bg_light,
-            foreground=fg_primary,
-            arrowcolor=accent_blue,
-            borderwidth=0)
+        self.style.configure('TLabel', background=bg_dark, foreground=fg_light, font=('Segoe UI', 10))
+        self.style.configure('Title.TLabel', font=('Segoe UI', 16, 'bold'), foreground=accent)
+        self.style.configure('TButton', font=('Segoe UI', 10))
+        self.style.configure('Success.TButton', foreground=success)
+        self.style.configure('Danger.TButton', foreground=error)
+        self.style.configure('TCombobox', fieldbackground=bg_medium, background=bg_medium)
+        self.style.configure('TNotebook', background=bg_dark, borderwidth=0)
+        self.style.configure('TNotebook.Tab', padding=[20, 10], font=('Segoe UI', 10))
     
     def create_widgets(self):
-        # 🎨 Header moderno com gradiente visual
         header_frame = ttk.Frame(self.root)
-        header_frame.pack(fill='x', padx=20, pady=(15, 10))
+        header_frame.pack(fill='x', padx=10, pady=10)
         
-        # Título grande e impactante
-        title_container = ttk.Frame(header_frame)
-        title_container.pack(side='left')
+        title = ttk.Label(header_frame, text="🌐 Monitor de Rede Professional", style='Title.TLabel')
+        title.pack(side='left')
         
-        title = ttk.Label(title_container, text="🌐 Monitor de Rede Professional", style='Title.TLabel')
-        title.pack(anchor='w')
-        
-        subtitle = ttk.Label(title_container, 
-            text="Sistema avançado de análise e monitoramento de conectividade", 
-            font=('Segoe UI', 9),
-            foreground='#8b92a8')
-        subtitle.pack(anchor='w', pady=(2, 0))
-        
-        # Versão no canto direito
-        version_label = ttk.Label(header_frame, 
-            text="v3.5.0", 
-            font=('Segoe UI', 9, 'bold'),
-            foreground='#58a6ff')
-        version_label.pack(side='right', padx=10)
-        
-        # Separador visual
-        separator = ttk.Frame(self.root, height=2, relief='flat')
-        separator.pack(fill='x', padx=20, pady=(0, 15))
-        
-        # Notebook com abas modernas
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill='both', expand=True, padx=20, pady=(0, 15))
+        self.notebook.pack(fill='both', expand=True, padx=10, pady=5)
         
-        # Aba de monitoramento com scroll
         self.tab_monitor = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_monitor, text='📊 Monitoramento')
-        
-        # Cria canvas com scrollbar
-        monitor_canvas = tk.Canvas(self.tab_monitor, bg='#0f1419', highlightthickness=0)
-        monitor_scrollbar = ttk.Scrollbar(self.tab_monitor, orient='vertical', command=monitor_canvas.yview)
-        self.monitor_scrollable_frame = ttk.Frame(monitor_canvas)
-        
-        self.monitor_scrollable_frame.bind(
-            '<Configure>',
-            lambda e: monitor_canvas.configure(scrollregion=monitor_canvas.bbox('all'))
-        )
-        
-        monitor_canvas.create_window((0, 0), window=self.monitor_scrollable_frame, anchor='nw')
-        monitor_canvas.configure(yscrollcommand=monitor_scrollbar.set)
-        
-        # Bind do scroll do mouse (apenas quando mouse está sobre o canvas)
-        def _on_mousewheel(event):
-            monitor_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        def _bind_to_mousewheel(event):
-            monitor_canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        
-        def _unbind_from_mousewheel(event):
-            monitor_canvas.unbind_all("<MouseWheel>")
-        
-        monitor_canvas.bind('<Enter>', _bind_to_mousewheel)
-        monitor_canvas.bind('<Leave>', _unbind_from_mousewheel)
-        
-        monitor_canvas.pack(side='left', fill='both', expand=True)
-        monitor_scrollbar.pack(side='right', fill='y')
-        
         self.create_monitor_tab()
         
         self.tab_stats = ttk.Frame(self.notebook)
@@ -1141,201 +675,84 @@ class MonitorGUI:
         self.create_wifi_tab()
     
     def create_monitor_tab(self):
-        # 🎛️ Card de controles modernos com mais espaçamento
-        control_frame = ttk.LabelFrame(self.monitor_scrollable_frame, text='⚙️  Painel de Controle', padding=25)
-        control_frame.pack(fill='x', padx=20, pady=15)
+        control_frame = ttk.LabelFrame(self.tab_monitor, text='Controles', padding=10)
+        control_frame.pack(fill='x', padx=10, pady=5)
         
-        # Linha 1: Servidor e Intervalo
-        config_row = ttk.Frame(control_frame)
-        config_row.pack(fill='x', pady=(0, 15))
+        ttk.Label(control_frame, text='Servidor:').grid(row=0, column=0, padx=5, pady=5, sticky='w')
         
-        # Servidor
-        server_container = ttk.Frame(config_row)
-        server_container.pack(side='left', padx=(0, 50))
-        
-        ttk.Label(server_container, 
-            text='🎯 Servidor:', 
-            font=('Segoe UI', 11, 'bold'),
-            foreground='#e1e4e8').pack(anchor='w', pady=(0, 8))
-        
+        # Filtra servidores válidos (remove separador)
         valid_servers = {k: v for k, v in self.monitor.servers.items() if v is not None}
-        self.server_combo = ttk.Combobox(server_container, 
-            values=list(valid_servers.keys()), 
-            width=30, 
-            state='readonly',
-            font=('Segoe UI', 10))
+        self.server_combo = ttk.Combobox(control_frame, values=list(valid_servers.keys()), width=25)
         self.server_combo.set('Google DNS')
-        self.server_combo.pack()
+        self.server_combo.grid(row=0, column=1, padx=5, pady=5)
         self.server_combo.bind('<<ComboboxSelected>>', self.on_server_change)
         
-        # Intervalo
-        interval_container = ttk.Frame(config_row)
-        interval_container.pack(side='left')
-        
-        ttk.Label(interval_container, 
-            text='⏱️  Intervalo (segundos):', 
-            font=('Segoe UI', 11, 'bold'),
-            foreground='#e1e4e8').pack(anchor='w', pady=(0, 8))
-        
-        self.interval_spin = ttk.Spinbox(interval_container, 
-            from_=0.01, 
-            to=60, 
-            increment=0.5, 
-            width=18,
-            font=('Segoe UI', 10))
+        ttk.Label(control_frame, text='Intervalo (s):').grid(row=0, column=2, padx=5, pady=5, sticky='w')
+        self.interval_spin = ttk.Spinbox(control_frame, from_=0.01, to=60, increment=0.5, width=10)
         self.interval_spin.set(self.monitor.interval)
-        self.interval_spin.pack()
+        self.interval_spin.grid(row=0, column=3, padx=5, pady=5)
         
-        # Linha 2: Botões de ação (grandes e destacados com mais espaço)
-        button_row = ttk.Frame(control_frame)
-        button_row.pack(fill='x', pady=(5, 0))
+        self.start_btn = ttk.Button(control_frame, text='▶ Iniciar', command=self.start_monitoring, style='Success.TButton')
+        self.start_btn.grid(row=0, column=4, padx=5, pady=5)
         
-        # Espaçador para centralizar botões
-        ttk.Frame(button_row).pack(side='left', expand=True)
+        self.stop_btn = ttk.Button(control_frame, text='⏸ Parar', command=self.stop_monitoring, state='disabled', style='Danger.TButton')
+        self.stop_btn.grid(row=0, column=5, padx=5, pady=5)
         
-        self.start_btn = ttk.Button(button_row, 
-            text='▶️  Iniciar Monitoramento', 
-            command=self.start_monitoring, 
-            style='Success.TButton',
-            width=28)
-        self.start_btn.pack(side='left', padx=8)
+        ttk.Button(control_frame, text='🔄 Resetar', command=self.reset_data).grid(row=0, column=6, padx=5, pady=5)
         
-        self.stop_btn = ttk.Button(button_row, 
-            text='⏸️  Pausar Monitoramento', 
-            command=self.stop_monitoring, 
-            state='disabled', 
-            style='Danger.TButton',
-            width=28)
-        self.stop_btn.pack(side='left', padx=8)
-        
-        ttk.Button(button_row, 
-            text='🔄  Resetar Dados', 
-            command=self.reset_data,
-            style='Primary.TButton',
-            width=22).pack(side='left', padx=8)
-        
-        # Espaçador para centralizar botões
-        ttk.Frame(button_row).pack(side='left', expand=True)
-        
-        # 📊 Cards de status modernos (estilo dashboard) com mais espaço
-        status_frame = ttk.LabelFrame(self.monitor_scrollable_frame, text='📊  Status em Tempo Real', padding=25)
-        status_frame.pack(fill='x', padx=20, pady=15)
+        status_frame = ttk.LabelFrame(self.tab_monitor, text='Status Atual', padding=10)
+        status_frame.pack(fill='x', padx=10, pady=5)
         
         self.status_labels = {}
-        
-        # Grid 3x2 de cards
         status_items = [
-            ('🔴 Estado', 'status', 0, 0),
-            ('⚡ Latência Atual', 'current_latency', 0, 1),
-            ('📉 Mínima', 'min_latency', 0, 2),
-            ('📈 Máxima', 'max_latency', 1, 0),
-            ('📊 Média', 'avg_latency', 1, 1),
-            ('📦 Perda de Pacotes', 'packet_loss', 1, 2)
+            ('Estado:', 'status'),
+            ('Latência Atual:', 'current_latency'),
+            ('Mínima:', 'min_latency'),
+            ('Máxima:', 'max_latency'),
+            ('Média:', 'avg_latency'),
+            ('Perda de Pacotes:', 'packet_loss')
         ]
         
-        for label_text, key, row, col in status_items:
-            # Card container com mais espaçamento
-            card = ttk.Frame(status_frame)
-            card.grid(row=row, column=col, padx=20, pady=15, sticky='nsew')
-            
-            # Label do card
-            ttk.Label(card, 
-                text=label_text, 
-                font=('Segoe UI', 10),
-                foreground='#8b92a8').pack(anchor='w', pady=(0, 8))
-            
-            # Valor destacado e maior
-            self.status_labels[key] = ttk.Label(card, 
-                text='--', 
-                font=('Segoe UI', 20, 'bold'),
-                foreground='#58a6ff')
-            self.status_labels[key].pack(anchor='w')
+        for i, (label, key) in enumerate(status_items):
+            ttk.Label(status_frame, text=label).grid(row=i//3, column=(i%3)*2, padx=10, pady=5, sticky='w')
+            self.status_labels[key] = ttk.Label(status_frame, text='--', font=('Segoe UI', 10, 'bold'))
+            self.status_labels[key].grid(row=i//3, column=(i%3)*2+1, padx=10, pady=5, sticky='w')
         
-        # Configura weight das colunas para distribuição uniforme
-        for i in range(3):
-            status_frame.columnconfigure(i, weight=1)
+        graph_frame = ttk.LabelFrame(self.tab_monitor, text='Gráfico de Latência em Tempo Real', padding=10)
+        graph_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
-        # Adiciona espaço entre as linhas
-        status_frame.rowconfigure(0, weight=1, minsize=80)
-        status_frame.rowconfigure(1, weight=1, minsize=80)
-        
-        # 📈 Gráfico moderno e elegante com mais espaço
-        graph_frame = ttk.LabelFrame(self.monitor_scrollable_frame, text='📈  Gráfico de Latência em Tempo Real', padding=20)
-        graph_frame.pack(fill='both', expand=True, padx=20, pady=15)
-        
-        # Cria figura maior com cores modernas
-        self.fig = Figure(figsize=(12, 5.5), facecolor='#1a1f2e', edgecolor='#252b3b', linewidth=2)
-        self.ax = self.fig.add_subplot(111, facecolor='#0f1419')
-        
-        # Estiliza o gráfico com fontes maiores e mais legíveis
-        self.ax.set_xlabel('Tempo (pings)', color='#e1e4e8', fontsize=11, fontweight='bold', labelpad=10)
-        self.ax.set_ylabel('Latência (ms)', color='#e1e4e8', fontsize=11, fontweight='bold', labelpad=10)
-        self.ax.tick_params(colors='#e1e4e8', labelsize=10, width=2, length=6, pad=8)
-        self.ax.grid(True, alpha=0.2, linestyle='--', linewidth=0.8, color='#58a6ff')
-        
-        # Remove bordas superiores e direitas para visual clean
-        self.ax.spines['top'].set_visible(False)
-        self.ax.spines['right'].set_visible(False)
-        self.ax.spines['left'].set_color('#58a6ff')
-        self.ax.spines['left'].set_linewidth(2)
-        self.ax.spines['bottom'].set_color('#58a6ff')
-        self.ax.spines['bottom'].set_linewidth(2)
-        
-        # Ajusta margens para mais espaço
-        self.fig.tight_layout(pad=3)
-        self.fig.subplots_adjust(left=0.08, right=0.97, top=0.95, bottom=0.12)
+        self.fig = Figure(figsize=(10, 4), facecolor='#2d2d2d')
+        self.ax = self.fig.add_subplot(111, facecolor='#1e1e1e')
+        self.ax.set_xlabel('Tempo', color='white')
+        self.ax.set_ylabel('Latência (ms)', color='white')
+        self.ax.tick_params(colors='white')
+        self.ax.grid(True, alpha=0.3)
         
         self.canvas = FigureCanvasTkAgg(self.fig, graph_frame)
         self.canvas.get_tk_widget().pack(fill='both', expand=True)
     
     def create_stats_tab(self):
-        # 📊 Dashboard de estatísticas moderno com mais espaço
-        summary_frame = ttk.LabelFrame(self.tab_stats, text='📊  Resumo Completo da Sessão', padding=35)
-        summary_frame.pack(fill='both', expand=True, padx=25, pady=20)
+        summary_frame = ttk.LabelFrame(self.tab_stats, text='Resumo da Sessão', padding=20)
+        summary_frame.pack(fill='x', padx=10, pady=10)
         
         self.stats_labels = {}
-        
-        # Grid de cards de estatísticas (2 colunas)
         stats_items = [
-            ('⏱️  Tempo de Monitoramento', 'uptime', 'Info'),
-            ('📊 Total de Pings', 'total_pings', 'Info'),
-            ('✅ Pings Bem-sucedidos', 'successful_pings', 'Success'),
-            ('❌ Pings Falhados', 'failed_pings', 'Error'),
-            ('📈 Taxa de Sucesso', 'success_rate', 'Success'),
-            ('🚨 Alertas Disparados', 'alerts_triggered', 'Warning'),
-            ('📉 Latência Mínima', 'min_latency_stat', 'Success'),
-            ('📈 Latência Máxima', 'max_latency_stat', 'Error'),
-            ('📊 Latência Média', 'avg_latency_stat', 'Info'),
-            ('📦 Perda de Pacotes Total', 'packet_loss_total', 'Warning')
+            ('Tempo de Monitoramento:', 'uptime'),
+            ('Total de Pings:', 'total_pings'),
+            ('Pings Bem-sucedidos:', 'successful_pings'),
+            ('Pings Falhados:', 'failed_pings'),
+            ('Taxa de Sucesso:', 'success_rate'),
+            ('Alertas Disparados:', 'alerts_triggered'),
+            ('Latência Mínima:', 'min_latency_stat'),
+            ('Latência Máxima:', 'max_latency_stat'),
+            ('Latência Média:', 'avg_latency_stat'),
+            ('Perda de Pacotes Total:', 'packet_loss_total')
         ]
         
-        for i, (label_text, key, style) in enumerate(stats_items):
-            row = i // 2
-            col = (i % 2) * 2
-            
-            # Card frame com mais espaçamento
-            card = ttk.Frame(summary_frame)
-            card.grid(row=row, column=col, columnspan=2, padx=25, pady=18, sticky='ew')
-            
-            # Ícone e label com mais espaço
-            label_frame = ttk.Frame(card)
-            label_frame.pack(side='left', fill='x', expand=True)
-            
-            ttk.Label(label_frame, 
-                text=label_text, 
-                font=('Segoe UI', 11),
-                foreground='#8b92a8').pack(anchor='w', pady=(0, 5))
-            
-            # Valor com estilo e fonte maior
-            self.stats_labels[key] = ttk.Label(card, 
-                text='--', 
-                font=('Segoe UI', 18, 'bold'),
-                style=f'{style}.TLabel')
-            self.stats_labels[key].pack(side='right', padx=15)
-        
-        # Configura colunas para distribuição uniforme
-        summary_frame.columnconfigure(0, weight=1)
-        summary_frame.columnconfigure(2, weight=1)
+        for i, (label, key) in enumerate(stats_items):
+            ttk.Label(summary_frame, text=label, font=('Segoe UI', 10)).grid(row=i//2, column=(i%2)*2, padx=20, pady=8, sticky='w')
+            self.stats_labels[key] = ttk.Label(summary_frame, text='--', font=('Segoe UI', 11, 'bold'))
+            self.stats_labels[key].grid(row=i//2, column=(i%2)*2+1, padx=20, pady=8, sticky='w')
     
     def create_anomalies_tab(self):
         """Aba dedicada a mostrar APENAS períodos de instabilidade"""
@@ -1454,22 +871,14 @@ class MonitorGUI:
         ttk.Label(config_frame, text='(ignora picos muito curtos, 5=padrão)', 
                   font=('Segoe UI', 8), foreground='gray').grid(row=4, column=2, padx=5, sticky='w')
         
-        # NOVA OPÇÃO: Aumento percentual mínimo
-        ttk.Label(config_frame, text='Aumento mínimo (%) para anomalia:').grid(row=5, column=0, padx=10, pady=10, sticky='w')
-        self.anomaly_min_increase_spin = ttk.Spinbox(config_frame, from_=10, to=200, increment=10, width=15)
-        self.anomaly_min_increase_spin.set(self.monitor.anomaly_min_increase_percent)
-        self.anomaly_min_increase_spin.grid(row=5, column=1, padx=10, pady=10)
-        ttk.Label(config_frame, text='(ignora variações normais, 50%=padrão)', 
-                  font=('Segoe UI', 8), foreground='gray').grid(row=5, column=2, padx=5, sticky='w')
-        
         self.sound_alert_var = tk.BooleanVar(value=self.monitor.enable_sound_alerts)
-        ttk.Checkbutton(config_frame, text='Ativar Alertas Sonoros', variable=self.sound_alert_var).grid(row=6, column=0, columnspan=2, padx=10, pady=10, sticky='w')
+        ttk.Checkbutton(config_frame, text='Ativar Alertas Sonoros', variable=self.sound_alert_var).grid(row=5, column=0, columnspan=2, padx=10, pady=10, sticky='w')
         
         self.visual_alert_var = tk.BooleanVar(value=self.monitor.enable_alerts)
-        ttk.Checkbutton(config_frame, text='Ativar Alertas Visuais', variable=self.visual_alert_var).grid(row=7, column=0, columnspan=2, padx=10, pady=10, sticky='w')
+        ttk.Checkbutton(config_frame, text='Ativar Alertas Visuais', variable=self.visual_alert_var).grid(row=6, column=0, columnspan=2, padx=10, pady=10, sticky='w')
         
         button_frame = ttk.Frame(config_frame)
-        button_frame.grid(row=8, column=0, columnspan=2, pady=20)
+        button_frame.grid(row=7, column=0, columnspan=2, pady=20)
         
         ttk.Button(button_frame, text='💾 Salvar Configurações', command=self.save_settings).pack(side='left', padx=5)
         ttk.Button(button_frame, text='🔄 Restaurar Padrões', command=self.restore_defaults).pack(side='left', padx=5)
@@ -1594,66 +1003,23 @@ class MonitorGUI:
             x_data = [self.monitor.ping_count_offset + i for i in range(samples_shown)]
             y_data = list(self.monitor.ping_history)
             
-            # Linha do gráfico com gradiente visual (azul vibrante)
-            self.ax.plot(x_data, y_data, 
-                color='#58a6ff',  # Azul moderno
-                linewidth=2, 
-                marker='o', 
-                markersize=3,
-                markerfacecolor='#58a6ff',
-                markeredgecolor='#1a73e8',
-                markeredgewidth=0.5,
-                linestyle='-',
-                alpha=0.9,
-                label='Latência')
+            self.ax.plot(x_data, y_data, color='#4ec9b0', linewidth=1.5, marker='', linestyle='-')
             
-            # Preenchimento abaixo da linha (efeito área)
-            self.ax.fill_between(x_data, y_data, alpha=0.15, color='#58a6ff')
-            
-            # Linha de threshold (vermelho vibrante)
             if self.monitor.alert_threshold:
-                self.ax.axhline(y=self.monitor.alert_threshold, 
-                    color='#f85149',  # Vermelho moderno
-                    linestyle='--', 
-                    linewidth=2, 
-                    alpha=0.7,
-                    label=f'⚠️ Limiar ({self.monitor.alert_threshold}ms)')
+                self.ax.axhline(y=self.monitor.alert_threshold, color='#f48771', linestyle='--', linewidth=1, label='Limiar')
             
             # Label informativo mostrando range
             if total_pings > samples_shown:
-                xlabel = f'Pings (exibindo últimos {samples_shown} de {total_pings} total)'
+                xlabel = f'Pings (mostrando últimos {samples_shown} de {total_pings} total)'
             else:
                 xlabel = f'Pings ({total_pings} total)'
             
-            self.ax.set_xlabel(xlabel, color='#e1e4e8', fontsize=11, fontweight='bold', labelpad=10)
-            self.ax.set_ylabel('Latência (ms)', color='#e1e4e8', fontsize=11, fontweight='bold', labelpad=10)
-            self.ax.tick_params(colors='#e1e4e8', labelsize=10, width=2, length=6, pad=8)
-            self.ax.set_facecolor('#0f1419')
-            self.ax.grid(True, alpha=0.2, linestyle='--', linewidth=0.8, color='#58a6ff')
-            
-            # Legenda moderna com fonte maior
-            legend = self.ax.legend(
-                facecolor='#1a1f2e', 
-                edgecolor='#58a6ff', 
-                labelcolor='#e1e4e8', 
-                fontsize=10,
-                framealpha=0.95,
-                loc='upper left',
-                frameon=True,
-                shadow=False,
-                borderpad=1,
-                labelspacing=0.8)
-            
-            # Remove bordas superiores/direitas e estiliza as outras
-            self.ax.spines['top'].set_visible(False)
-            self.ax.spines['right'].set_visible(False)
-            self.ax.spines['left'].set_color('#58a6ff')
-            self.ax.spines['left'].set_linewidth(2)
-            self.ax.spines['bottom'].set_color('#58a6ff')
-            self.ax.spines['bottom'].set_linewidth(2)
-            
-            # Ajusta margens para mais espaço ao redor
-            self.fig.subplots_adjust(left=0.08, right=0.97, top=0.95, bottom=0.12)
+            self.ax.set_xlabel(xlabel, color='white', fontsize=9)
+            self.ax.set_ylabel('Latência (ms)', color='white', fontsize=9)
+            self.ax.tick_params(colors='white', labelsize=8)
+            self.ax.set_facecolor('#1e1e1e')
+            self.ax.grid(True, alpha=0.2, linewidth=0.5)
+            self.ax.legend(facecolor='#2d2d2d', edgecolor='white', labelcolor='white', fontsize=8)
             
             # OTIMIZAÇÃO: draw_idle() é mais rápido que draw()
             self.canvas.draw_idle()
@@ -2009,17 +1375,15 @@ class MonitorGUI:
             self.monitor.anomaly_min_consecutive_normal = int(self.anomaly_buffer_spin.get())
             self.monitor.anomaly_deviation_multiplier = float(self.anomaly_deviation_spin.get())
             self.monitor.anomaly_min_pings = int(self.anomaly_min_pings_spin.get())
-            self.monitor.anomaly_min_increase_percent = float(self.anomaly_min_increase_spin.get())
             self.monitor.enable_sound_alerts = self.sound_alert_var.get()
             self.monitor.enable_alerts = self.visual_alert_var.get()
             
             self.monitor.save_config()
             messagebox.showinfo("Sucesso", "Configurações salvas com sucesso!\n\n"
-                              f"Detecção inteligente:\n"
+                              f"Detecção híbrida:\n"
                               f"• Threshold fixo: {self.monitor.alert_threshold}ms\n"
                               f"• Desvio estatístico: {self.monitor.anomaly_deviation_multiplier}x\n"
-                              f"• Mínimo de pings: {self.monitor.anomaly_min_pings}\n"
-                              f"• Aumento mínimo: {self.monitor.anomaly_min_increase_percent}%")
+                              f"• Mínimo de pings: {self.monitor.anomaly_min_pings}")
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao salvar configurações: {e}")
     
@@ -2028,7 +1392,6 @@ class MonitorGUI:
             self.alert_threshold_spin.set(100)
             self.packet_loss_spin.set(5)
             self.anomaly_buffer_spin.set(10)
-            self.anomaly_min_increase_spin.set(50)
             self.anomaly_deviation_spin.set(2.5)
             self.anomaly_min_pings_spin.set(5)
             self.sound_alert_var.set(True)
